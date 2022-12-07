@@ -7,7 +7,7 @@ use std::path::Path;
 use std::ptr;
 use std::slice;
 
-use libarchive3_sys::ffi;
+use libarchive3_sys::ffi::{self, Struct_archive_entry};
 use libc::{c_void, ssize_t};
 
 use crate::archive::{Entry, Handle, ReadCompression, ReadFilter, ReadFormat};
@@ -15,10 +15,11 @@ use crate::error::{ArchiveError, ArchiveResult};
 
 const BLOCK_SIZE: usize = 10240;
 
-unsafe extern "C" fn stream_read_callback(handle: *mut ffi::Struct_archive,
-                                          data: *mut c_void,
-                                          buff: *mut *const c_void)
-                                          -> ssize_t {
+unsafe extern "C" fn stream_read_callback(
+    handle: *mut ffi::Struct_archive,
+    data: *mut c_void,
+    buff: *mut *const c_void,
+) -> ssize_t {
     let pipe: &mut Pipe = &mut *(data as *mut Pipe);
     *buff = pipe.buffer.as_mut_ptr() as *mut c_void;
     match pipe.read_bytes() {
@@ -31,7 +32,7 @@ unsafe extern "C" fn stream_read_callback(handle: *mut ffi::Struct_archive,
     }
 }
 
-pub trait Reader: Handle {
+pub trait Reader: Handle + Sized {
     fn entry(&mut self) -> &mut ReaderEntry;
 
     fn header_position(&self) -> i64 {
@@ -148,11 +149,13 @@ impl StreamReader {
         unsafe {
             let mut pipe = Box::new(Pipe::new(src));
             let pipe_ptr: *mut c_void = &mut *pipe as *mut Pipe as *mut c_void;
-            match ffi::archive_read_open(builder.handle(),
-                                         pipe_ptr,
-                                         None,
-                                         Some(stream_read_callback),
-                                         None) {
+            match ffi::archive_read_open(
+                builder.handle(),
+                pipe_ptr,
+                None,
+                Some(stream_read_callback),
+                None,
+            ) {
                 ffi::ARCHIVE_OK => {
                     let reader = StreamReader {
                         handle: builder.handle(),
@@ -238,7 +241,9 @@ impl Builder {
     }
 
     pub fn support_all(self) -> ArchiveResult<Self> {
-        self.support_format(ReadFormat::All)?.support_filter(ReadFilter::All)?.support_compression(ReadCompression::All)
+        self.support_format(ReadFormat::All)?
+            .support_filter(ReadFilter::All)?
+            .support_compression(ReadCompression::All)
     }
 
     pub fn support_filter(self, filter: ReadFilter) -> ArchiveResult<Self> {
@@ -262,10 +267,12 @@ impl Builder {
             ReadFilter::ProgramSignature(prog, cb, size) => {
                 let c_prog = CString::new(prog).unwrap();
                 unsafe {
-                    ffi::archive_read_support_filter_program_signature(self.handle,
-                                                                       c_prog.as_ptr(),
-                                                                       mem::transmute(cb),
-                                                                       size)
+                    ffi::archive_read_support_filter_program_signature(
+                        self.handle,
+                        c_prog.as_ptr(),
+                        mem::transmute(cb),
+                        size,
+                    )
                 }
             }
             ReadFilter::Rpm => unsafe { ffi::archive_read_support_filter_rpm(self.handle) },

@@ -162,10 +162,12 @@ impl Disk {
         unsafe {
             loop {
                 total_size += size;
-                match ffi::archive_read_data_block(reader.handle(),
-                                                   &mut buff,
-                                                   &mut size,
-                                                   &mut offset) {
+                match ffi::archive_read_data_block(
+                    reader.handle(),
+                    &mut buff,
+                    &mut size,
+                    &mut offset,
+                ) {
                     ffi::ARCHIVE_EOF => {
                         return Ok(total_size + size);
                     }

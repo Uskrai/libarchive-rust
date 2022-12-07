@@ -1,5 +1,5 @@
-extern crate libc;
 extern crate libarchive3_sys;
+extern crate libc;
 
 pub mod archive;
 pub mod error;
