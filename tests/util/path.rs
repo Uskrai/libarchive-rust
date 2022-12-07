@@ -6,7 +6,7 @@ pub fn exe_path() -> PathBuf {
 }
 
 pub fn root() -> PathBuf {
-    exe_path().parent().unwrap().parent().unwrap().parent().unwrap().join("tests")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
 pub fn fixtures() -> PathBuf {
