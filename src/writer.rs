@@ -7,7 +7,7 @@ use libarchive3_sys::ffi;
 
 use crate::archive::{Entry, ExtractOptions, Handle, WriteFilter, WriteFormat};
 use crate::error::{ArchiveError, ArchiveResult};
-use crate::reader::{Reader, ReaderEntry};
+use crate::reader::{Reader, ReaderEntryHandle};
 
 pub struct Writer {
     handle: *mut ffi::Struct_archive,
@@ -184,7 +184,7 @@ impl Disk {
         }
     }
 
-    fn write_header(&self, entry: &ReaderEntry) -> ArchiveResult<()> {
+    fn write_header(&self, entry: &ReaderEntryHandle) -> ArchiveResult<()> {
         unsafe {
             match ffi::archive_write_header(self.handle, entry.entry()) {
                 ffi::ARCHIVE_OK => Ok(()),

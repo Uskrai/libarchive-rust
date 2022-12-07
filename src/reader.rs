@@ -33,13 +33,13 @@ unsafe extern "C" fn stream_read_callback(
 }
 
 pub trait Reader: Handle + Sized {
-    fn entry(&mut self) -> &mut ReaderEntry;
+    fn entry(&mut self) -> &mut ReaderEntryHandle;
 
     fn header_position(&self) -> i64 {
         unsafe { ffi::archive_read_header_position(self.handle()) }
     }
 
-    fn next_header(&mut self) -> Option<&mut ReaderEntry> {
+    fn next_header(&mut self) -> Option<&mut ReaderEntryHandle> {
         let res = unsafe { ffi::archive_read_next_header(self.handle(), &mut self.entry().handle) };
         if res == 0 {
             Some(self.entry())
@@ -63,14 +63,14 @@ pub trait Reader: Handle + Sized {
     }
 }
 
-pub struct FileReader {
+pub struct FileReaderHandle {
     handle: *mut ffi::Struct_archive,
-    entry: ReaderEntry,
+    entry: ReaderEntryHandle,
 }
 
-pub struct StreamReader {
+pub struct StreamReaderHandle {
     handle: *mut ffi::Struct_archive,
-    entry: ReaderEntry,
+    entry: ReaderEntryHandle,
     _pipe: Box<Pipe>,
 }
 
@@ -79,7 +79,7 @@ pub struct Builder {
     consumed: bool,
 }
 
-pub struct ReaderEntry {
+pub struct ReaderEntryHandle {
     handle: *mut ffi::Struct_archive_entry,
 }
 
@@ -101,7 +101,7 @@ impl Pipe {
     }
 }
 
-impl FileReader {
+impl FileReaderHandle {
     pub fn open<T: AsRef<Path>>(mut builder: Builder, file: T) -> ArchiveResult<Self> {
         builder.check_consumed()?;
         let c_file = CString::new(file.as_ref().to_string_lossy().as_bytes()).unwrap();
@@ -117,26 +117,26 @@ impl FileReader {
     }
 
     fn new(handle: *mut ffi::Struct_archive) -> Self {
-        FileReader {
-            handle: handle,
-            entry: ReaderEntry::default(),
+        FileReaderHandle {
+            handle,
+            entry: ReaderEntryHandle::default(),
         }
     }
 }
 
-impl Handle for FileReader {
+impl Handle for FileReaderHandle {
     unsafe fn handle(&self) -> *mut ffi::Struct_archive {
         self.handle
     }
 }
 
-impl Reader for FileReader {
-    fn entry(&mut self) -> &mut ReaderEntry {
+impl Reader for FileReaderHandle {
+    fn entry(&mut self) -> &mut ReaderEntryHandle {
         &mut self.entry
     }
 }
 
-impl Drop for FileReader {
+impl Drop for FileReaderHandle {
     fn drop(&mut self) {
         unsafe {
             ffi::archive_read_free(self.handle());
@@ -144,7 +144,7 @@ impl Drop for FileReader {
     }
 }
 
-impl StreamReader {
+impl StreamReaderHandle {
     pub fn open<T: Any + Read>(mut builder: Builder, src: T) -> ArchiveResult<Self> {
         unsafe {
             let mut pipe = Box::new(Pipe::new(src));
@@ -157,9 +157,9 @@ impl StreamReader {
                 None,
             ) {
                 ffi::ARCHIVE_OK => {
-                    let reader = StreamReader {
+                    let reader = StreamReaderHandle {
                         handle: builder.handle(),
-                        entry: ReaderEntry::default(),
+                        entry: ReaderEntryHandle::default(),
                         _pipe: pipe,
                     };
                     builder.consume();
@@ -174,19 +174,19 @@ impl StreamReader {
     }
 }
 
-impl Handle for StreamReader {
+impl Handle for StreamReaderHandle {
     unsafe fn handle(&self) -> *mut ffi::Struct_archive {
         self.handle
     }
 }
 
-impl Reader for StreamReader {
-    fn entry(&mut self) -> &mut ReaderEntry {
+impl Reader for StreamReaderHandle {
+    fn entry(&mut self) -> &mut ReaderEntryHandle {
         &mut self.entry
     }
 }
 
-impl Drop for StreamReader {
+impl Drop for StreamReaderHandle {
     fn drop(&mut self) {
         unsafe {
             ffi::archive_read_free(self.handle());
@@ -311,14 +311,14 @@ impl Builder {
         }
     }
 
-    pub fn open_file<T: AsRef<Path>>(self, file: T) -> ArchiveResult<FileReader> {
+    pub fn open_file<T: AsRef<Path>>(self, file: T) -> ArchiveResult<FileReaderHandle> {
         self.check_consumed()?;
-        FileReader::open(self, file)
+        FileReaderHandle::open(self, file)
     }
 
-    pub fn open_stream<T: Any + Read>(self, src: T) -> ArchiveResult<StreamReader> {
+    pub fn open_stream<T: Any + Read>(self, src: T) -> ArchiveResult<StreamReaderHandle> {
         self.check_consumed()?;
-        StreamReader::open(self, src)
+        StreamReaderHandle::open(self, src)
     }
 
     fn check_consumed(&self) -> ArchiveResult<()> {
