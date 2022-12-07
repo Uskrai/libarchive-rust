@@ -10,3 +10,6 @@ keywords = ["libarchive", "archive", "tar", "zip"]
 [dependencies]
 libc = ">= 0.2.0"
 libarchive3-sys = "0.1"
+
+[dev-dependencies]
+tempfile = "3.3.0"
