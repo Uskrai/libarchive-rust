@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::str;
 
 use libarchive3_sys::ffi;
-use error::ErrCode;
+use crate::error::ErrCode;
 
 pub enum ReadCompression {
     All,

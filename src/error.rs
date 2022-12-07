@@ -1,6 +1,5 @@
 use std::error;
 use std::fmt;
-use archive;
 
 pub type ArchiveResult<T> = Result<T, ArchiveError>;
 
@@ -42,14 +41,14 @@ impl fmt::Display for ArchiveError {
     }
 }
 
-impl<'a> From<&'a archive::Handle> for ArchiveError {
-    fn from(handle: &'a archive::Handle) -> ArchiveError {
+impl<'a> From<&'a dyn crate::archive::Handle> for ArchiveError {
+    fn from(handle: &'a dyn crate::archive::Handle) -> ArchiveError {
         ArchiveError::Sys(handle.err_code(), handle.err_msg())
     }
 }
 
-impl<'a> From<&'a archive::Handle> for ArchiveResult<()> {
-    fn from(handle: &'a archive::Handle) -> ArchiveResult<()> {
+impl<'a> From<&'a dyn crate::archive::Handle> for ArchiveResult<()> {
+    fn from(handle: &'a dyn crate::archive::Handle) -> ArchiveResult<()> {
         match handle.err_code() {
             ErrCode(0) => Ok(()),
             _ => Err(ArchiveError::from(handle)),

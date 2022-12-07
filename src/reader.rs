@@ -1,6 +1,5 @@
 use std::any::Any;
 use std::default::Default;
-use std::error::Error;
 use std::ffi::CString;
 use std::io::{self, Read};
 use std::mem;
@@ -8,11 +7,11 @@ use std::path::Path;
 use std::ptr;
 use std::slice;
 
-use libc::{c_void, ssize_t};
 use libarchive3_sys::ffi;
+use libc::{c_void, ssize_t};
 
-use archive::{Entry, ReadCompression, ReadFilter, ReadFormat, Handle};
-use error::{ArchiveResult, ArchiveError};
+use crate::archive::{Entry, Handle, ReadCompression, ReadFilter, ReadFormat};
+use crate::error::{ArchiveError, ArchiveResult};
 
 const BLOCK_SIZE: usize = 10240;
 
@@ -25,14 +24,14 @@ unsafe extern "C" fn stream_read_callback(handle: *mut ffi::Struct_archive,
     match pipe.read_bytes() {
         Ok(size) => size as ssize_t,
         Err(e) => {
-            let desc = CString::new(e.description()).unwrap();
+            let desc = CString::new(e.to_string()).unwrap();
             ffi::archive_set_error(handle, e.raw_os_error().unwrap_or(0), desc.as_ptr());
             -1 as ssize_t
         }
     }
 }
 
-pub trait Reader : Handle {
+pub trait Reader: Handle {
     fn entry(&mut self) -> &mut ReaderEntry;
 
     fn header_position(&self) -> i64 {
@@ -84,7 +83,7 @@ pub struct ReaderEntry {
 }
 
 struct Pipe {
-    reader: Box<Read>,
+    reader: Box<dyn Read>,
     buffer: Vec<u8>,
 }
 
@@ -103,7 +102,7 @@ impl Pipe {
 
 impl FileReader {
     pub fn open<T: AsRef<Path>>(mut builder: Builder, file: T) -> ArchiveResult<Self> {
-        try!(builder.check_consumed());
+        builder.check_consumed()?;
         let c_file = CString::new(file.as_ref().to_string_lossy().as_bytes()).unwrap();
         unsafe {
             match ffi::archive_read_open_filename(builder.handle(), c_file.as_ptr(), BLOCK_SIZE) {
@@ -111,7 +110,7 @@ impl FileReader {
                     builder.consume();
                     Ok(Self::new(builder.handle()))
                 }
-                _ => Err(ArchiveError::from(&builder as &Handle)),
+                _ => Err(ArchiveError::from(&builder as &dyn Handle)),
             }
         }
     }
@@ -165,7 +164,7 @@ impl StreamReader {
                 }
                 _ => {
                     builder.consume();
-                    Err(ArchiveError::from(&builder as &Handle))
+                    Err(ArchiveError::from(&builder as &dyn Handle))
                 }
             }
         }
@@ -197,7 +196,7 @@ impl Builder {
         Builder::default()
     }
 
-    pub fn support_compression(&mut self, compression: ReadCompression) -> ArchiveResult<()> {
+    pub fn support_compression(self, compression: ReadCompression) -> ArchiveResult<Self> {
         let result = match compression {
             ReadCompression::All => unsafe {
                 ffi::archive_read_support_compression_all(self.handle)
@@ -233,12 +232,16 @@ impl Builder {
             ReadCompression::Xz => unsafe { ffi::archive_read_support_compression_xz(self.handle) },
         };
         match result {
-            ffi::ARCHIVE_OK => Ok(()),
-            _ => ArchiveResult::from(self as &Handle),
+            ffi::ARCHIVE_OK => Ok(self),
+            _ => ArchiveResult::from(&self as &dyn Handle).map(|_| self),
         }
     }
 
-    pub fn support_filter(&mut self, filter: ReadFilter) -> ArchiveResult<()> {
+    pub fn support_all(self) -> ArchiveResult<Self> {
+        self.support_format(ReadFormat::All)?.support_filter(ReadFilter::All)?.support_compression(ReadCompression::All)
+    }
+
+    pub fn support_filter(self, filter: ReadFilter) -> ArchiveResult<Self> {
         let result = match filter {
             ReadFilter::All => unsafe { ffi::archive_read_support_filter_all(self.handle) },
             ReadFilter::Bzip2 => unsafe { ffi::archive_read_support_filter_bzip2(self.handle) },
@@ -270,12 +273,12 @@ impl Builder {
             ReadFilter::Xz => unsafe { ffi::archive_read_support_filter_xz(self.handle) },
         };
         match result {
-            ffi::ARCHIVE_OK => Ok(()),
-            _ => ArchiveResult::from(self as &Handle),
+            ffi::ARCHIVE_OK => Ok(self),
+            _ => ArchiveResult::from(&self as &dyn Handle).map(|_| self),
         }
     }
 
-    pub fn support_format(&self, format: ReadFormat) -> ArchiveResult<()> {
+    pub fn support_format(self, format: ReadFormat) -> ArchiveResult<Self> {
         let result = match format {
             ReadFormat::SevenZip => unsafe { ffi::archive_read_support_format_7zip(self.handle()) },
             ReadFormat::All => unsafe { ffi::archive_read_support_format_all(self.handle()) },
@@ -296,18 +299,18 @@ impl Builder {
             ReadFormat::Zip => unsafe { ffi::archive_read_support_format_zip(self.handle()) },
         };
         match result {
-            ffi::ARCHIVE_OK => Ok(()),
-            _ => ArchiveResult::from(self as &Handle),
+            ffi::ARCHIVE_OK => Ok(self),
+            _ => ArchiveResult::from(&self as &dyn Handle).map(|_| self),
         }
     }
 
     pub fn open_file<T: AsRef<Path>>(self, file: T) -> ArchiveResult<FileReader> {
-        try!(self.check_consumed());
+        self.check_consumed()?;
         FileReader::open(self, file)
     }
 
     pub fn open_stream<T: Any + Read>(self, src: T) -> ArchiveResult<StreamReader> {
-        try!(self.check_consumed());
+        self.check_consumed()?;
         StreamReader::open(self, src)
     }
 
@@ -363,7 +366,9 @@ impl ReaderEntry {
 
 impl Default for ReaderEntry {
     fn default() -> Self {
-        ReaderEntry { handle: ptr::null_mut() }
+        ReaderEntry {
+            handle: ptr::null_mut(),
+        }
     }
 }
 
