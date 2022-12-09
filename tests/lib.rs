@@ -3,9 +3,23 @@ extern crate libarchive;
 pub mod util;
 
 use libarchive::archive;
-use libarchive::reader::{self, Reader};
+use libarchive::reader::{self};
 use libarchive::writer;
 use std::fs::File;
+use std::io::Read;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+fn assert_string(string: &str) {
+    assert_eq!(string, "hello, world!\n");
+}
+
+fn assert_fixture(tempdir: &tempfile::TempDir) {
+    assert_string(
+        std::fs::read_to_string(tempdir.path().join("hello.txt"))
+            .unwrap()
+            .as_str(),
+    );
+}
 
 #[test]
 fn reading_from_file() {
@@ -43,6 +57,7 @@ fn read_archive_from_stream() {
             let count = writer.write(&mut reader, tempfile.path().to_str()).unwrap();
             assert_eq!(count, 14);
             assert_eq!(reader.header_position(), 1024);
+            assert_fixture(&tempfile);
             assert_eq!(4, 4);
         }
         Err(e) => {
@@ -59,7 +74,8 @@ fn extracting_from_file() {
     println!("{:?}", reader.header_position());
     let writer = writer::Disk::new();
     let tempfile = tempfile::tempdir().unwrap();
-    writer.write(&mut reader, tempfile.path().to_str()).ok();
+    writer.write(&mut reader, tempfile.path().to_str()).unwrap();
+    assert_fixture(&tempfile);
     println!("{:?}", reader.header_position());
     assert_eq!(4, 4)
 }
@@ -76,8 +92,8 @@ fn extracting_an_archive_with_options() {
     writer.set_options(&opts).ok();
     let tempfile = tempfile::tempdir().unwrap();
     writer.write(&mut reader, tempfile.path().to_str()).ok();
-    println!("{:?}", reader.header_position());
-    assert_eq!(4, 4)
+    assert_fixture(&tempfile);
+    assert_eq!(reader.header_position(), 1024)
 }
 
 #[test]
@@ -90,9 +106,71 @@ fn extracting_a_reader_twice() {
     let writer = writer::Disk::new();
     writer.write(&mut reader, tempfile.path().to_str()).ok();
     println!("{:?}", reader.header_position());
-    match writer.write(&mut reader, tempfile.path().to_str()) {
-        Ok(_) => println!("oops"),
-        Err(_) => println!("nice"),
-    }
-    assert_eq!(4, 4)
+    writer
+        .write(&mut reader, tempfile.path().to_str())
+        .expect_err("writing twice should error");
+    assert_fixture(&tempfile);
+}
+
+#[test]
+fn read_in_memory() {
+    let tar = util::path::fixture("sample.tar.gz");
+    let reader = reader::Builder::new()
+        .support_all()
+        .unwrap()
+        .open_file(tar)
+        .unwrap();
+
+    let mut iter = reader.into_iter();
+
+    let mut hello = iter.next().unwrap().unwrap();
+    assert_eq!(hello.pathname().unwrap().as_str(), "hello.txt");
+    assert_eq!(hello.size(), 14);
+
+    let mut string = String::new();
+    hello.read_to_string(&mut string).unwrap();
+    assert_string(&string);
+
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn panic_on_prev_iter() {
+    let tar = util::path::fixture("sample.tar.gz");
+    let reader = reader::Builder::new()
+        .support_all()
+        .unwrap()
+        .open_file(tar)
+        .unwrap();
+
+    let mut iter = reader.into_iter();
+
+    let hello = iter.next().unwrap().unwrap();
+
+    assert!(iter.next().is_none());
+    catch_unwind(AssertUnwindSafe(|| {
+        hello.size();
+    }))
+    .expect_err("should panic");
+}
+
+fn reader() -> reader::ReaderHandle {
+    reader::Builder::new()
+        .support_all()
+        .unwrap()
+        .open_file(util::path::fixture("sample.tar.gz"))
+        .unwrap()
+}
+
+#[test]
+fn multiple_pathname_call() {
+    let mut iter = reader().into_iter();
+    let hello = iter.next().unwrap().unwrap();
+
+    {
+        assert_eq!(hello.pathname().unwrap().as_str(), "hello.txt");
+    };
+    {
+        assert_eq!(hello.pathname().unwrap().as_str(), "hello.txt");
+    };
 }

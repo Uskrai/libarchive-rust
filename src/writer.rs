@@ -7,7 +7,7 @@ use libarchive3_sys::ffi;
 
 use crate::archive::{Entry, ExtractOptions, Handle, WriteFilter, WriteFormat};
 use crate::error::{ArchiveError, ArchiveResult};
-use crate::reader::{Reader, ReaderEntryHandle};
+use crate::reader::{ReaderEntryHandle, ReaderHandle};
 
 pub struct Writer {
     handle: *mut ffi::Struct_archive,
@@ -102,7 +102,7 @@ impl Disk {
     }
 
     // * Failures - HeaderPosition
-    pub fn write<T: Reader>(&self, reader: &mut T, prefix: Option<&str>) -> ArchiveResult<usize> {
+    pub fn write(&self, reader: &mut ReaderHandle, prefix: Option<&str>) -> ArchiveResult<usize> {
         if reader.header_position() != 0 {
             return Err(ArchiveError::HeaderPosition);
         }
@@ -153,7 +153,7 @@ impl Disk {
         }
     }
 
-    fn write_data<T: Reader>(&self, reader: &T) -> ArchiveResult<usize> {
+    fn write_data(&self, reader: &ReaderHandle) -> ArchiveResult<usize> {
         let mut total_size = 0;
         let mut buff = ptr::null();
         let mut size = 0;

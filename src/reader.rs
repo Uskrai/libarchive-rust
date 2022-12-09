@@ -1,13 +1,15 @@
 use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::default::Default;
 use std::ffi::CString;
 use std::io::{self, Read};
 use std::mem;
 use std::path::Path;
 use std::ptr;
+use std::rc::Rc;
 use std::slice;
 
-use libarchive3_sys::ffi::{self, Struct_archive_entry};
+use libarchive3_sys::ffi::{self};
 use libc::{c_void, ssize_t};
 
 use crate::archive::{Entry, Handle, ReadCompression, ReadFilter, ReadFormat};
@@ -35,19 +37,6 @@ unsafe extern "C" fn stream_read_callback(
 pub trait Reader: Handle + Sized {
     fn entry(&mut self) -> &mut ReaderEntryHandle;
 
-    fn header_position(&self) -> i64 {
-        unsafe { ffi::archive_read_header_position(self.handle()) }
-    }
-
-    fn next_header(&mut self) -> Option<&mut ReaderEntryHandle> {
-        let res = unsafe { ffi::archive_read_next_header(self.handle(), &mut self.entry().handle) };
-        if res == 0 {
-            Some(self.entry())
-        } else {
-            None
-        }
-    }
-
     fn read_block(&self) -> ArchiveResult<Option<&[u8]>> {
         let mut buff = ptr::null();
         let mut size = 0;
@@ -63,15 +52,217 @@ pub trait Reader: Handle + Sized {
     }
 }
 
-pub struct FileReaderHandle {
-    handle: *mut ffi::Struct_archive,
-    entry: ReaderEntryHandle,
+pub struct ArchiveIterator {
+    reader: Rc<ReaderHandle>,
+    entry: *mut ffi::Struct_archive_entry,
+    current: std::rc::Rc<std::cell::Cell<Option<usize>>>,
 }
 
-pub struct StreamReaderHandle {
+impl Iterator for ArchiveIterator {
+    type Item = ArchiveResult<ArchiveEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            let current = match self.current.get() {
+                Some(v) => v + 1,
+                None => 0,
+            };
+            self.current.set(Some(current));
+
+            match ffi::archive_read_next_header(self.reader.handle, &mut self.entry) {
+                ffi::ARCHIVE_OK => Some(Ok(ArchiveEntry::new(
+                    self.reader.clone(),
+                    self.entry,
+                    self.current.clone(),
+                    current,
+                ))),
+                ffi::ARCHIVE_EOF => None,
+                _ => Some(Err(ArchiveError::from(self.reader.as_ref() as &dyn Handle))),
+            }
+        }
+    }
+}
+
+pub struct ReaderHandle {
     handle: *mut ffi::Struct_archive,
     entry: ReaderEntryHandle,
-    _pipe: Box<Pipe>,
+    _pipe: Option<Box<Pipe>>,
+}
+
+impl Handle for ReaderHandle {
+    unsafe fn handle(&self) -> *mut ffi::Struct_archive {
+        self.handle
+    }
+}
+
+impl ReaderHandle {
+    fn new_file(handle: *mut ffi::Struct_archive) -> ReaderHandle {
+        Self {
+            handle,
+            entry: Default::default(),
+            _pipe: None,
+        }
+    }
+
+    fn new_stream(handle: *mut ffi::Struct_archive, pipe: Box<Pipe>) -> ReaderHandle {
+        Self {
+            handle,
+            entry: Default::default(),
+            _pipe: Some(pipe),
+        }
+    }
+
+    pub fn header_position(&self) -> i64 {
+        unsafe { ffi::archive_read_header_position(self.handle) }
+    }
+
+    pub fn next_header(&mut self) -> Option<&mut ReaderEntryHandle> {
+        let res = unsafe { ffi::archive_read_next_header(self.handle, &mut self.entry.handle) };
+        if res == 0 {
+            Some(&mut self.entry)
+        } else {
+            None
+        }
+    }
+}
+
+impl IntoIterator for ReaderHandle {
+    type Item = ArchiveResult<ArchiveEntry>;
+
+    type IntoIter = ArchiveIterator;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ArchiveIterator {
+            reader: Rc::new(self),
+            entry: unsafe { ffi::archive_entry_new() },
+            current: Default::default(),
+        }
+    }
+}
+
+impl Drop for ReaderHandle {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::archive_read_free(self.handle);
+        }
+    }
+}
+
+pub struct ArchiveEntry {
+    handle: *mut ffi::Struct_archive_entry,
+    reader: Rc<ReaderHandle>,
+    iterator_current: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    current: usize,
+
+}
+
+impl ArchiveEntry {
+    pub fn new(
+        reader: Rc<ReaderHandle>,
+        handle: *mut ffi::Struct_archive_entry,
+        iterator_current: Rc<Cell<Option<usize>>>,
+        current: usize,
+    ) -> Self {
+        Self {
+            handle,
+            reader,
+            iterator_current,
+            current,
+        }
+    }
+    pub fn is_current(&self) -> bool {
+        self.iterator_current.get() == Some(self.current)
+    }
+    pub fn check_current(&self) {
+        assert!(
+            self.is_current(),
+            "ArchiveEntry can only be used on current iterator item"
+        );
+    }
+
+    pub fn pathname(&self) -> Option<String> {
+        self.check_current();
+
+        let pathname = unsafe { ffi::archive_entry_pathname(self.handle) };
+
+        if pathname.is_null() {
+            return None;
+        }
+
+        let pathname = unsafe { std::ffi::CStr::from_ptr(pathname) };
+
+        let string = pathname.to_str().ok().map(|it| it.to_string())?;
+
+        Some(string)
+    }
+
+    pub fn size(&self) -> i64 {
+        self.check_current();
+        unsafe { ffi::archive_entry_size(self.handle) }
+    }
+
+    pub fn filetype(&self) -> ArchiveEntryFiletype {
+        self.check_current();
+        let it = unsafe {
+            match ffi::archive_entry_filetype(self.handle) {
+                ffi::AE_IFREG => ArchiveEntryFiletype::RegularFile,
+                ffi::AE_IFLNK => ArchiveEntryFiletype::SymbolicLink,
+                ffi::AE_IFSOCK => ArchiveEntryFiletype::Socket,
+                ffi::AE_IFCHR => ArchiveEntryFiletype::CharacterDevice,
+                ffi::AE_IFDIR => ArchiveEntryFiletype::Directory,
+                ffi::AE_IFIFO => ArchiveEntryFiletype::NamedPipe,
+                i => {
+                    ArchiveEntryFiletype::Unkown
+                }
+            }
+        };
+        it
+    }
+
+    pub fn is_directory(&self) -> bool {
+        self.check_current();
+        matches!(self.filetype(), ArchiveEntryFiletype::Directory)
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.check_current();
+        matches!(self.filetype(), ArchiveEntryFiletype::RegularFile)
+    }
+}
+
+impl Read for ArchiveEntry {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.check_current();
+
+        let size = unsafe {
+            ffi::archive_read_data(self.reader.handle, buf.as_mut_ptr() as *mut c_void, buf.len())
+        };
+
+        if size < 0 {
+            let err = ArchiveError::from(self as &dyn Handle);
+
+            return Err(io::Error::new(io::ErrorKind::Other, err));
+        }
+
+        Ok(size.try_into().unwrap())
+    }
+}
+
+impl Handle for ArchiveEntry {
+    unsafe fn handle(&self) -> *mut ffi::Struct_archive {
+        self.reader.handle
+    }
+}
+
+#[derive(Debug)]
+pub enum ArchiveEntryFiletype {
+    RegularFile,
+    SymbolicLink,
+    Socket,
+    CharacterDevice,
+    Directory,
+    NamedPipe,
+    Unkown,
 }
 
 pub struct Builder {
@@ -98,99 +289,6 @@ impl Pipe {
 
     fn read_bytes(&mut self) -> io::Result<usize> {
         self.reader.read(&mut self.buffer[..])
-    }
-}
-
-impl FileReaderHandle {
-    pub fn open<T: AsRef<Path>>(mut builder: Builder, file: T) -> ArchiveResult<Self> {
-        builder.check_consumed()?;
-        let c_file = CString::new(file.as_ref().to_string_lossy().as_bytes()).unwrap();
-        unsafe {
-            match ffi::archive_read_open_filename(builder.handle(), c_file.as_ptr(), BLOCK_SIZE) {
-                ffi::ARCHIVE_OK => {
-                    builder.consume();
-                    Ok(Self::new(builder.handle()))
-                }
-                _ => Err(ArchiveError::from(&builder as &dyn Handle)),
-            }
-        }
-    }
-
-    fn new(handle: *mut ffi::Struct_archive) -> Self {
-        FileReaderHandle {
-            handle,
-            entry: ReaderEntryHandle::default(),
-        }
-    }
-}
-
-impl Handle for FileReaderHandle {
-    unsafe fn handle(&self) -> *mut ffi::Struct_archive {
-        self.handle
-    }
-}
-
-impl Reader for FileReaderHandle {
-    fn entry(&mut self) -> &mut ReaderEntryHandle {
-        &mut self.entry
-    }
-}
-
-impl Drop for FileReaderHandle {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::archive_read_free(self.handle());
-        }
-    }
-}
-
-impl StreamReaderHandle {
-    pub fn open<T: Any + Read>(mut builder: Builder, src: T) -> ArchiveResult<Self> {
-        unsafe {
-            let mut pipe = Box::new(Pipe::new(src));
-            let pipe_ptr: *mut c_void = &mut *pipe as *mut Pipe as *mut c_void;
-            match ffi::archive_read_open(
-                builder.handle(),
-                pipe_ptr,
-                None,
-                Some(stream_read_callback),
-                None,
-            ) {
-                ffi::ARCHIVE_OK => {
-                    let reader = StreamReaderHandle {
-                        handle: builder.handle(),
-                        entry: ReaderEntryHandle::default(),
-                        _pipe: pipe,
-                    };
-                    builder.consume();
-                    Ok(reader)
-                }
-                _ => {
-                    builder.consume();
-                    Err(ArchiveError::from(&builder as &dyn Handle))
-                }
-            }
-        }
-    }
-}
-
-impl Handle for StreamReaderHandle {
-    unsafe fn handle(&self) -> *mut ffi::Struct_archive {
-        self.handle
-    }
-}
-
-impl Reader for StreamReaderHandle {
-    fn entry(&mut self) -> &mut ReaderEntryHandle {
-        &mut self.entry
-    }
-}
-
-impl Drop for StreamReaderHandle {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::archive_read_free(self.handle());
-        }
     }
 }
 
@@ -311,14 +409,45 @@ impl Builder {
         }
     }
 
-    pub fn open_file<T: AsRef<Path>>(self, file: T) -> ArchiveResult<FileReaderHandle> {
+    pub fn open_file<T: AsRef<Path>>(mut self, file: T) -> ArchiveResult<ReaderHandle> {
         self.check_consumed()?;
-        FileReaderHandle::open(self, file)
+
+        let c_file = CString::new(file.as_ref().to_string_lossy().as_bytes()).unwrap();
+        unsafe {
+            match ffi::archive_read_open_filename(self.handle(), c_file.as_ptr(), BLOCK_SIZE) {
+                ffi::ARCHIVE_OK => {
+                    self.consume();
+                    Ok(ReaderHandle::new_file(self.handle()))
+                }
+                _ => Err(ArchiveError::from(&self as &dyn Handle)),
+            }
+        }
+        // FileReaderHandle::open(self, file)
     }
 
-    pub fn open_stream<T: Any + Read>(self, src: T) -> ArchiveResult<StreamReaderHandle> {
+    pub fn open_stream<T: Any + Read>(mut self, src: T) -> ArchiveResult<ReaderHandle> {
         self.check_consumed()?;
-        StreamReaderHandle::open(self, src)
+
+        unsafe {
+            let mut pipe = Box::new(Pipe::new(src));
+            let pipe_ptr: *mut c_void = &mut *pipe as *mut Pipe as *mut c_void;
+            match ffi::archive_read_open(
+                self.handle(),
+                pipe_ptr,
+                None,
+                Some(stream_read_callback),
+                None,
+            ) {
+                ffi::ARCHIVE_OK => {
+                    self.consume();
+                    Ok(ReaderHandle::new_stream(self.handle(), pipe))
+                }
+                _ => {
+                    self.consume();
+                    Err(ArchiveError::from(&self as &dyn Handle))
+                }
+            }
+        }
     }
 
     fn check_consumed(&self) -> ArchiveResult<()> {
@@ -358,28 +487,28 @@ impl Default for Builder {
                 panic!("Allocation error");
             }
             Builder {
-                handle: handle,
+                handle,
                 consumed: false,
             }
         }
     }
 }
 
-impl ReaderEntry {
+impl ReaderEntryHandle {
     pub fn new(handle: *mut ffi::Struct_archive_entry) -> Self {
-        ReaderEntry { handle: handle }
+        ReaderEntryHandle { handle }
     }
 }
 
-impl Default for ReaderEntry {
+impl Default for ReaderEntryHandle {
     fn default() -> Self {
-        ReaderEntry {
+        ReaderEntryHandle {
             handle: ptr::null_mut(),
         }
     }
 }
 
-impl Entry for ReaderEntry {
+impl Entry for ReaderEntryHandle {
     unsafe fn entry(&self) -> *mut ffi::Struct_archive_entry {
         self.handle
     }
