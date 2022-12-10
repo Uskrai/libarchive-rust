@@ -10,7 +10,7 @@ edition = "2021"
 
 [dependencies]
 libc = ">= 0.2.0"
-libarchive3-sys = "0.1"
+libarchive3-sys = { git = "https://github.com/uskrai/libarchive3-sys", rev = "a871830677734c87594053ae43a880d4ae008883" }
 
 [dev-dependencies]
 tempfile = "3.3.0"
